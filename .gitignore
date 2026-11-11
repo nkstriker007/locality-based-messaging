@@ -1,0 +1,11 @@
+build/
+.vscode/
+*.log
+Testing/
+raft_state_*.txt
+raft_state_*.txt.tmp
+raft_log_*.bin
+raft_log_*.bin.tmp
+ui/_gen/
+ui/_run*/
+__pycache__/

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LBM · Cluster Console</title>
+<style>
+  :root {
+    --bg: #0d1017; --panel: #141922; --panel2: #1a2130; --line: #263042;
+    --text: #d8dee9; --dim: #7d8799; --faint: #4a5468;
+    --leader: #f2b84b; --ok: #4fd18b; --warn: #f2994b; --bad: #f2555a; --info: #6aa8ff;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+  header { display: flex; align-items: center; gap: 28px; padding: 16px 28px;
+           border-bottom: 1px solid var(--line); background: #0f131b; position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 15px; letter-spacing: .08em; text-transform: uppercase; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--dim); font-weight: 400; }
+  .stat { display: flex; flex-direction: column; }
+  .stat b { font: 600 16px var(--mono); }
+  .stat small { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .pill { font: 600 11px var(--mono); padding: 3px 8px; border-radius: 99px; text-transform: uppercase; letter-spacing: .05em; }
+  .pill.ok { background: #4fd18b22; color: var(--ok); } .pill.bad { background: #f2555a22; color: var(--bad); }
+  .pill.warn { background: #f2994b22; color: var(--warn); }
+  main { padding: 22px 28px 60px; display: grid; gap: 22px; max-width: 1500px; margin: 0 auto; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+  h2 em { font-style: normal; color: var(--faint); text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 8px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; position: relative; transition: border-color .3s, opacity .3s; }
+  .card.leader { border-color: var(--leader); box-shadow: 0 0 0 1px #f2b84b33, 0 8px 30px -12px #f2b84b55; }
+  .card.down { opacity: .55; }
+  .card .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .card .name { font: 600 15px var(--mono); }
+  .card .addr { color: var(--faint); font: 11px var(--mono); }
+  .role { font: 700 10px var(--mono); padding: 3px 7px; border-radius: 4px; letter-spacing: .08em; text-transform: uppercase; }
+  .role.leader { background: var(--leader); color: #1b1404; }
+  .role.follower { background: #6aa8ff22; color: var(--info); }
+  .role.candidate { background: #f2994b22; color: var(--warn); animation: blink 1s infinite; }
+  .role.stopped { background: #f2555a22; color: var(--bad); }
+  .role.paused { background: #ffffff11; color: var(--dim); }
+  @keyframes blink { 50% { opacity: .4; } }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0 0 12px; font-size: 12.5px; }
+  dt { color: var(--dim); } dd { margin: 0; font-family: var(--mono); text-align: right; }
+  .bar { height: 4px; background: var(--panel2); border-radius: 2px; overflow: hidden; margin: 2px 0 10px; }
+  .bar i { display: block; height: 100%; background: var(--ok); transition: width .3s; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  button { font: 600 12px var(--sans); background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+           padding: 6px 11px; border-radius: 6px; cursor: pointer; }
+  button:hover { border-color: var(--dim); }
+  button.danger { color: var(--bad); } button.danger:hover { border-color: var(--bad); }
+  button.primary { background: var(--info); color: #06101f; border-color: var(--info); }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: grid; gap: 22px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 1000px) { .row { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  input, select { font: 13px var(--mono); background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 6px; padding: 7px 9px; min-width: 0; }
+  input:focus, select:focus { outline: none; border-color: var(--info); }
+  .form { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form input.grow { flex: 1; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow: auto; }
+  .chip { font: 12px var(--mono); background: var(--panel2); border: 1px solid var(--line); padding: 3px 4px 3px 9px;
+          border-radius: 99px; display: inline-flex; gap: 6px; align-items: center; }
+  .chip button { padding: 0 6px; border: 0; background: none; color: var(--faint); font-size: 14px; line-height: 1; }
+  .chip button:hover { color: var(--bad); }
+  .log { font: 12px/1.6 var(--mono); max-height: 300px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+  .log li { display: flex; gap: 10px; border-bottom: 1px dashed #ffffff08; padding: 2px 0; }
+  .log time { color: var(--faint); flex: none; }
+  .log .good { color: var(--ok); } .log .bad { color: var(--bad); } .log .warn { color: var(--warn); }
+  pre.out { font: 12px/1.55 var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+            padding: 12px; margin: 0; min-height: 120px; white-space: pre-wrap; color: #b9c3d3; }
+  .hash { font: 600 13px var(--mono); letter-spacing: .04em; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .conv { margin-left: auto; }
+  .flexhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .flexhead h2 { margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Locality Messaging <span>· cluster console</span></h1>
+  <div class="stat"><b id="h-leader">—</b><small>leader</small></div>
+  <div class="stat"><b id="h-term">—</b><small>term</small></div>
+  <div class="stat"><b id="h-epoch">—</b><small>ACL epoch</small></div>
+  <div class="stat"><b id="h-up">—</b><small>nodes up</small></div>
+  <span id="h-quorum" class="pill">—</span>
+</header>
+
+<main>
+  <section>
+    <h2>Control plane · Raft <em>kill the leader and watch a new one get elected</em></h2>
+    <div class="grid" id="raft"></div>
+  </section>
+
+  <div class="row">
+    <section class="panel">
+      <h2>Access control list <em>writes go through the leader and return once committed</em></h2>
+      <div class="form">
+        <input id="acl-user" class="grow" placeholder="user id, e.g. alice" autocomplete="off">
+        <button class="primary" onclick="acl('add')">Add</button>
+        <button class="danger" onclick="acl('revoke')">Revoke</button>
+      </div>
+      <div class="chips" id="users"></div>
+    </section>
+    <section class="panel">
+      <h2>Event log</h2>
+      <ul class="log" id="events"></ul>
+    </section>
+  </div>
+
+  <section>
+    <div class="flexhead">
+      <h2>Data plane · CRDT log <em>each node authorises senders through its Raft node</em></h2>
+      <span id="conv" class="pill conv">—</span>
+    </div>
+    <div class="grid" id="dp"></div>
+  </section>
+
+  <div class="row">
+    <section class="panel">
+      <h2>Send a message</h2>
+      <div class="form">
+        <input id="chat-user" list="userlist" placeholder="sender" style="width:130px" autocomplete="off">
+        <datalist id="userlist"></datalist>
+        <input id="chat-text" class="grow" placeholder="message" autocomplete="off">
+      </div>
+      <div class="form">
+        <select id="chat-target"></select>
+        <button class="primary" onclick="chat()">Send</button>
+        <button onclick="post('/api/sync')">Run anti-entropy</button>
+      </div>
+      <p class="muted">Send to one node to make the logs diverge, then run anti-entropy:
+        the merge is idempotent, so every node converges to the same hash.
+        Messages from revoked users are rejected.</p>
+    </section>
+    <section class="panel">
+      <h2>Throughput benchmark <em>starts its own cluster on ports 51053+</em></h2>
+      <div class="form">
+        <label class="muted">nodes <input id="b-nodes" type="number" value="3" min="3" max="9" style="width:60px"></label>
+        <label class="muted">clients <input id="b-clients" type="number" value="8" min="1" max="64" style="width:64px"></label>
+        <label class="muted">ops/client <input id="b-ops" type="number" value="300" min="10" max="2000" style="width:76px"></label>
+        <button class="primary" id="b-run" onclick="bench()">Run</button>
+      </div>
+      <pre class="out" id="b-out">Committed ops/sec = time until every write is in the leader's applied ACL.</pre>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                               body: body ? JSON.stringify(body) : null });
+  refresh();
+  return r.json().catch(() => ({}));
+}
+const act = (id, a) => post(`/api/node/${id}/${a}`);
+async function acl(action, user) {
+  user = user || $("acl-user").value.trim();
+  if (!user) return;
+  await post("/api/acl", { action, user });
+  if (action === "add") { $("acl-user").value = ""; if (!$("chat-user").value) $("chat-user").value = user; }
+}
+async function chat() {
+  const user = $("chat-user").value.trim(), text = $("chat-text").value;
+  if (!user || !text) return;
+  await post("/api/chat", { user, text, target: $("chat-target").value });
+  $("chat-text").value = "";
+}
+async function bench() {
+  await post("/api/bench", { nodes: +$("b-nodes").value, clients: +$("b-clients").value, ops: +$("b-ops").value });
+}
+$("chat-text").addEventListener("keydown", (e) => e.key === "Enter" && chat());
+$("acl-user").addEventListener("keydown", (e) => e.key === "Enter" && acl("add"));
+
+function procButtons(id, proc) {
+  if (proc === "stopped") return `<button onclick="act('${id}','start')">Restart</button>`;
+  if (proc === "paused") return `<button onclick="act('${id}','resume')">Resume</button>
+                                 <button class="danger" onclick="act('${id}','kill')">Kill</button>`;
+  return `<button class="danger" onclick="act('${id}','kill')">Kill</button>
+          <button onclick="act('${id}','pause')">Pause</button>`;
+}
+
+function raftCard(n, maxLog) {
+  const s = n.status, role = n.proc !== "running" ? n.proc : (s ? s.role : "unreachable");
+  const pct = s && maxLog ? Math.round(100 * s.commit_index / maxLog) : 0;
+  return `<div class="card ${role === "leader" ? "leader" : ""} ${s ? "" : "down"}">
+    <div class="top"><div><div class="name">${esc(n.id)}</div><div class="addr">${esc(n.addr)}</div></div>
+      <span class="role ${role}">${role}</span></div>
+    <dl>
+      <dt>term</dt><dd>${s ? s.term : "—"}</dd>
+      <dt>leader</dt><dd>${s ? esc(s.leader_id || "?") : "—"}</dd>
+      <dt>log / commit / applied</dt><dd>${s ? `${s.log_size} / ${s.commit_index} / ${s.last_applied}` : "—"}</dd>
+      <dt>epoch · users</dt><dd>${s ? `${s.epoch} · ${s.user_count}` : "—"}</dd>
+    </dl>
+    <div class="bar" title="commit index vs. most advanced node"><i style="width:${pct}%"></i></div>
+    <div class="btns">${procButtons(n.id, n.proc)}</div></div>`;
+}
+
+function dpCard(d) {
+  const s = d.status;
+  return `<div class="card ${s ? "" : "down"}">
+    <div class="top"><div><div class="name">${esc(d.id)}</div><div class="addr">${esc(d.addr)} · auth via ${esc(d.auth)}</div></div>
+      <span class="role ${s ? "follower" : d.proc}">${s ? "up" : d.proc}</span></div>
+    <dl>
+      <dt>entries</dt><dd>${s ? s.entries : "—"}</dd>
+      <dt>log hash</dt><dd class="hash">${s ? s.hash.toString(16).padStart(8, "0") : "—"}</dd>
+      <dt>max lamport · clock</dt><dd>${s ? `${s.max_lamport} · ${s.clock}` : "—"}</dd>
+    </dl>
+    <div class="btns">${procButtons(d.id, d.proc)}</div></div>`;
+}
+
+let lastUsers = "", lastTargets = "";
+async function refresh() {
+  let st;
+  try { st = await (await fetch("/api/state")).json(); } catch { return; }
+  const up = st.nodes.filter((n) => n.status).length;
+  const L = st.nodes.find((n) => n.id === st.leader);
+  $("h-leader").textContent = st.leader || "none";
+  $("h-leader").style.color = st.leader ? "var(--leader)" : "var(--bad)";
+  $("h-term").textContent = L && L.status ? L.status.term : "—";
+  $("h-epoch").textContent = st.epoch || "—";
+  $("h-up").textContent = `${up}/${st.nodes.length}`;
+  const q = $("h-quorum");
+  q.textContent = up >= st.quorum ? `quorum ok (${st.quorum})` : `no quorum (need ${st.quorum})`;
+  q.className = "pill " + (up >= st.quorum ? "ok" : "bad");
+
+  const maxLog = Math.max(1, ...st.nodes.map((n) => (n.status ? n.status.log_size : 0)));
+  $("raft").innerHTML = st.nodes.map((n) => raftCard(n, maxLog)).join("");
+  $("dp").innerHTML = st.data.map(dpCard).join("");
+  const c = $("conv");
+  const anyMsgs = st.messages > 0;
+  c.textContent = st.converged ? (anyMsgs ? "converged" : "empty · converged") : "diverged";
+  c.className = "pill conv " + (st.converged ? "ok" : "warn");
+
+  const uKey = st.users.join(",");
+  if (uKey !== lastUsers) {
+    lastUsers = uKey;
+    const shown = st.users.filter((u) => !u.startsWith("__"));
+    $("users").innerHTML = shown.length
+      ? shown.map((u) => `<span class="chip">${esc(u)}<button title="revoke" onclick="acl('revoke','${esc(u)}')">×</button></span>`).join("")
+      : `<span class="muted">no users yet — add one, then send a message as that user</span>`;
+    $("userlist").innerHTML = shown.map((u) => `<option value="${esc(u)}">`).join("");
+  }
+  const tKey = st.data.map((d) => d.id).join(",");
+  if (tKey !== lastTargets) {
+    lastTargets = tKey;
+    $("chat-target").innerHTML = `<option value="all">→ all data nodes</option>` +
+      st.data.map((d) => `<option value="${d.id}">→ ${d.id} only</option>`).join("");
+  }
+  $("events").innerHTML = st.events.slice().reverse().map((e) =>
+    `<li><time>${new Date(e.t * 1000).toLocaleTimeString()}</time><span class="${e.kind}">${esc(e.text)}</span></li>`).join("");
+  $("b-out").textContent = st.bench.output || $("b-out").textContent;
+  $("b-run").disabled = st.bench.running;
+}
+refresh();
+setInterval(refresh, 500);
+</script>
+</body>
+</html>
