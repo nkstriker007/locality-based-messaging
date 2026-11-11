@@ -80,20 +80,34 @@ Data plane (`src/log_store.cpp`, `src/data_plane_service.cpp`)
   epoch to what Raft has authorised (previously `test_acl` failed).
 - `lamport_time` is no longer truncated to `int32` in `append()`.
 
-### Live dashboard
-
-![dashboard](docs/dashboard.png)
+### Live dashboard (Cluster Console)
 
 ```bash
-pip install -r ui/requirements.txt
-python3 ui/dashboard.py --nodes 3            # add --host 0.0.0.0 to open it from outside the VM
+python3 -m venv .venv && .venv/bin/pip install -r ui/requirements.txt
+.venv/bin/python ui/dashboard.py --nodes 3   # add --host 0.0.0.0 to open it from outside the VM
 # open http://localhost:8080
 ```
 
 It starts N Raft nodes + N data-plane nodes and shows role, term, commit index and epoch live.
-You can kill, restart or pause any node (failover time is logged), add or revoke users,
-send messages to one or all data nodes to watch the CRDT logs diverge and converge, and run
-the throughput benchmark.
+
+**Control plane (Raft).** Each Raft node shows its role, term, log/commit/applied indexes and
+ACL epoch. Kill or pause the leader to watch a new one get elected (failover time is logged).
+ACL writes go through the leader and return only once committed.
+
+![Raft control plane](docs/dashboard-raft.png)
+
+**Data plane (CRDT log).** Each data-plane node authorises senders through its own Raft node.
+The cards show entry count, log hash and Lamport clock, so you can see the logs diverge and
+converge again.
+
+![CRDT data plane](docs/dashboard-dataplane.png)
+
+**Messaging and benchmark.** Send a message to all data nodes, or to just one so the logs
+diverge, then run anti-entropy: the merge is idempotent, so every node converges to the same
+hash. Messages from revoked users are rejected. The throughput benchmark starts its own
+cluster and reports committed ops/sec.
+
+![Messaging and throughput benchmark](docs/dashboard-messaging-bench.png)
 
 ### Benchmarks & tests
 
