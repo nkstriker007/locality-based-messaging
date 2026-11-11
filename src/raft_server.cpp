@@ -34,17 +34,21 @@ public:
 
     // --- Admin Endpoints ---
     Status AddUser(ServerContext* context, const AddUserRequest* req, AddUserResponse* resp) override {
-        bool is_leader = node_->ProposeCommand(LogEntry::ADD_USER, req->user_id());
-        resp->set_success(is_leader);
+        std::string hint;
+        bool committed = node_->ProposeCommand(LogEntry::ADD_USER, req->user_id(), &hint);
+        resp->set_success(committed);              // true only once committed + applied
         resp->set_current_epoch(node_->getCurrentEpoch());
+        resp->set_leader_hint(hint);
         return Status::OK;
     }
 
     Status RevokeUser(ServerContext* context, const RevokeUserRequest* req, RevokeUserResponse* resp) override {
-        bool is_leader = node_->ProposeCommand(LogEntry::REVOKE_USER, req->user_id());
-        resp->set_success(is_leader);
-        // Note: Real epoch increment happens after commit, returning current for now
-        resp->set_new_epoch(node_->getCurrentEpoch()); 
+        std::string hint;
+        bool committed = node_->ProposeCommand(LogEntry::REVOKE_USER, req->user_id(), &hint);
+        resp->set_success(committed);
+        // the revoke is applied before ProposeCommand returns, so this is the new epoch
+        resp->set_new_epoch(node_->getCurrentEpoch());
+        resp->set_leader_hint(hint);
         return Status::OK;
     }
 
@@ -58,6 +62,10 @@ public:
         resp->set_user_id(req->user_id());
         resp->set_epoch(node_->getCurrentEpoch());
         return Status::OK;
+    }
+
+    Status GetStatus(ServerContext* context, const StatusRequest* req, StatusResponse* resp) override {
+        return node_->HandleGetStatus(req, resp);
     }
 
     // --- Internal Raft RPCs ---

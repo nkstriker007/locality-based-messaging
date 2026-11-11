@@ -1,154 +1,355 @@
-# Locality-Based Messaging System — Data Plane
+# Locality-Based Messaging System
 
-Narayan's data plane component for a distributed messaging system. Implements an append-only gossip log with Lamport clock ordering, CRDT set-union merges, and ACL enforcement via Venkat's control plane.
+Distributed Systems Project — Raft + CRDT Data Plane
+
+---
+
+## Overview
+
+This project implements a distributed messaging system that combines strong consistency (Raft control plane), eventual consistency (CRDT data plane), secure message enforcement (ACL + epochs), and fault tolerance with recovery.
+
+The system demonstrates real-world distributed systems principles including consensus via Raft, log replication, failure recovery, concurrency, and performance benchmarking.
+
+---
+
+## v2 — Performance, Reliability & Dashboard (extensions by Narayan)
+
+Work done on this fork after the course submission. Every number below is
+measured with `bench/tput_bench`, running both versions back-to-back on the same
+machine (2 vCPU Ubuntu 24.04 VM, all nodes on localhost).
+
+### Results
+
+**Control plane (Raft). Committed ACL writes/sec**: the clock stops only when
+every write is applied on the leader, so this measures real consensus.
+
+| Cluster | Clients | Before (ops/s) | After (ops/s) | Speed-up | p99 latency before → after |
+|---|---|---|---|---|---|
+| 3 nodes | 1  | ~1,030 | ~1,700 | 1.7× | 13 ms → 1.8 ms |
+| 3 nodes | 8  | ~1,050 | ~3,300 | **3.2×** | 28 ms → 5.5 ms |
+| 3 nodes | 32 | ~725   | ~4,250 | **5.9×** | 204 ms → 17 ms |
+| 5 nodes | 8  | ~625   | ~2,480 | **4.0×** | 43 ms → 7 ms |
+| 7 nodes | 8  | ~520   | ~1,900 | **3.7×** | 48 ms → 9 ms |
+
+> The old `AddUser` returned *before* the entry was committed, so its latency did
+> not include consensus at all. The new version replies only after a majority has
+> the entry and the leader has applied it. It is still faster.
+
+**Data plane (CRDT log). SyncLogs merge throughput**, 4 peers × 200 batches × 100 msgs (80k messages):
+
+| | Before | After |
+|---|---|---|
+| merged msgs/sec | ~4,600 | **~99,000 (≈21×)** |
+| SyncLogs p99    | 397 ms | 12 ms |
+
+**Fault tolerance** (`bench/failover_test.py`): 4 clients write continuously while
+the leader is SIGKILLed and restarted, then the *whole cluster* is killed and
+restarted from disk. Result: **0 of ~8,500 acknowledged writes lost** (3- and 5-node
+clusters). Leader failover takes ~0.5 s (election timeout 300–600 ms).
+
+### What changed
+
+Control plane (`src/raft_node.cpp`)
+- **One replication thread per peer** instead of a detached `std::thread` per peer on every
+  heartbeat and every proposal. Each peer has one AppendEntries in flight. Everything proposed
+  meanwhile goes out in the next RPC (**batching / group commit**, up to 1024 entries).
+- **Commit-wait**: `AddUser`/`RevokeUser` return `success=true` only once committed and applied.
+  `RevokeUser` now returns the real new epoch.
+- **Raft log persisted** (`raft_log_<id>.bin`), plus term, vote and an ACL snapshot (atomic
+  write via tmp + rename). Before this, only term/vote/users were saved and the log was lost on
+  restart. Set `RAFT_FSYNC=1` to fdatasync every append.
+- **Deadlines on every RPC**, and gRPC reconnect back-off capped at 250 ms, so a restarted
+  node rejoins without forcing a needless election.
+- **Fast log back-off**: on mismatch the follower returns a conflict index, so the leader jumps
+  back a whole term at once instead of one entry per round-trip.
+- **No-op entry on election**, so entries from earlier terms can commit (Raft §5.4.2).
+- Election timeout randomized once per reset (it used to be re-rolled every 10 ms tick).
+- New RPC `GetStatus`. `AddUser`/`RevokeUser` responses carry a `leader_hint` for redirects.
+
+Data plane (`src/log_store.cpp`, `src/data_plane_service.cpp`)
+- **Auth batching + cache**: one `CheckAuthorization` per distinct (sender, epoch) per batch,
+  cached for 200 ms (`LBM_AUTH_CACHE_MS`; 0 disables). This used to be one blocking RPC per message.
+- **Sorted insert instead of full re-sort**: merge sorts only the new entries and splices them in
+  (`O(k log k + n)` instead of `O(n log n)` per sync). Appends take the `O(k)` fast path.
+- **Hash index** for O(1) dedup and O(log n) `read()` (both were linear scans).
+- **Incremental, order-independent log hash** (FNV-1a based). `get_hash()` is O(1) and stable
+  across machines (`std::hash` is not).
+- `SyncLogs` no longer copies the whole log to build the summary. Per-message logging is
+  behind `LBM_VERBOSE`.
+- Epoch handling fixed: entries with a *future* epoch are rejected, and the data plane advances its
+  epoch to what Raft has authorised (previously `test_acl` failed).
+- `lamport_time` is no longer truncated to `int32` in `append()`.
+
+### Live dashboard (Cluster Console)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r ui/requirements.txt
+.venv/bin/python ui/dashboard.py --nodes 3   # add --host 0.0.0.0 to open it from outside the VM
+# open http://localhost:8080
+```
+
+It starts N Raft nodes + N data-plane nodes and shows role, term, commit index and epoch live.
+
+**Control plane (Raft).** Each Raft node shows its role, term, log/commit/applied indexes and
+ACL epoch. Kill or pause the leader to watch a new one get elected (failover time is logged).
+ACL writes go through the leader and return only once committed.
+
+![Raft control plane](docs/dashboard-raft.png)
+
+**Data plane (CRDT log).** Each data-plane node authorises senders through its own Raft node.
+The cards show entry count, log hash and Lamport clock, so you can see the logs diverge and
+converge again.
+
+![CRDT data plane](docs/dashboard-dataplane.png)
+
+**Messaging and benchmark.** Send a message to all data nodes, or to just one so the logs
+diverge, then run anti-entropy: the merge is idempotent, so every node converges to the same
+hash. Messages from revoked users are rejected. The throughput benchmark starts its own
+cluster and reports committed ops/sec.
+
+![Messaging and throughput benchmark](docs/dashboard-messaging-bench.png)
+
+### Benchmarks & tests
+
+```bash
+./build/tput_bench raft 3 8 300        # nodes, clients, ops per client
+./build/tput_bench dp 100 200 4        # batch size, batches, clients
+python3 bench/failover_test.py 3 6     # nodes, seconds
+./build/all_tests && ./test_raft_local.sh && ./build/full_system_test
+```
+
+### Known trade-offs
+
+- **Revocation vs. convergence**: auth is checked at merge time against the *current* ACL, so a
+  message accepted before a revoke can be rejected by nodes that receive it later. Logs can then
+  legitimately differ. (`test_raft_rpcs` requires that old-epoch messages from revoked users are
+  denied.) Proper fix: sign messages and validate against the epoch they were created in.
+- Merge throughput drops for very large logs when concurrent peers interleave in Lamport order
+  (mid-log inserts are O(n)). A chunked/B-tree log would fix it.
+- No pre-vote, so a node coming back from a long pause can still trigger an election.
+- The auth cache lets a revoked user sync for up to `LBM_AUTH_CACHE_MS` after revocation.
+
+---
 
 ## Architecture
 
 ```
-node-1 :50051 ──SyncLogs──► node-2 :50052
-     │                           │
-     └──── CheckAuthorization ───┘
-                  │
-             auth :50053
-          (Venkat's IntegrationAuth)
+                +--------------------+
+                |      Clients       |
+                +--------+-----------+
+                         | RPC
+                         v
+         +-------------------------------+
+         |   Control Plane (Raft)        |
+         |   - Leader election           |
+         |   - Ordered log               |
+         |   - ACL management            |
+         +--------+----------------------+
+                  | Apply
+                  v
+         +-------------------------------+
+         |   Data Plane (LogStore)       |
+         |   - Append-only log           |
+         |   - Lamport ordering          |
+         |   - CRDT merge                |
+         +--------+----------------------+
+                  |
+                  v
+         +-------------------------------+
+         |   SyncLogs (Gossip)           |
+         |   - Anti-entropy              |
+         |   - Recovery                  |
+         +-------------------------------+
 ```
 
-Three roles across the team:
+---
 
-- **Narayan** — data plane: log storage, Lamport clock, CRDT merge (`DataPlaneGossip`)
-- **Kriti** — sync & merge: gossip fanout, anti-entropy, peer discovery
-- **Venkat** — control plane: Raft leader election, ACL membership, epoch certificates (`IntegrationAuth`)
+## Components
+
+### Data Plane (Narayan)
+
+- `LogStore` — append-only log with mutex-protected operations
+- Lamport clock ordering with atomic increment and update
+- CRDT merge using set-union semantics
+- Deterministic, incremental log hashing (FNV-1a)
+
+### Control Plane (Raft)
+
+- Leader election with randomised timeouts
+- Log replication across nodes
+- Commit index tracking
+- State machine execution for ACL mutations
+
+### Authorization (IntegrationAuth)
+
+- Per-message validation on every gossip batch
+- Epoch-based revocation — revoked members cannot inject messages
+- Secure enforcement of ACL rules at merge time
+
+---
 
 ## Project Structure
 
 ```
-locality based messaging system/
-├── docker/
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   └── scripts/
-│       └── run_tests.sh
+locality_based_messaging/
 ├── include/
-│   ├── log_entry.h          # ChatEntry struct (internal log entry)
-│   ├── lamport_clock.h      # Atomic Lamport clock
-│   └── log_store.h          # LogStore interface
-├── proto/
-│   └── locality_messaging.proto   # Shared team contract
+│   ├── log_store.h
+│   ├── lamport_clock.h
+│   └── log_entry.h
 ├── src/
+│   ├── log_store.cpp
 │   ├── lamport_clock.cpp
-│   ├── log_store.cpp        # append, read, merge, get_hash
-│   ├── log_server.cpp       # DataPlaneGossip gRPC server
-│   ├── log_client.cpp       # SyncLogs client
-│   └── fake_auth_server.cpp # Stub for IntegrationAuth (until Venkat's is ready)
+│   ├── log_server.cpp
+│   ├── log_client.cpp
+│   ├── fake_auth_server.cpp
+│   ├── partition_sim.cpp
+│   ├── latency_bench.cpp
+│   ├── crash_sim.cpp
+│   └── correctness_eval.cpp
 ├── tests/
-│   ├── test_lamport_clock.cpp
 │   ├── test_log_store.cpp
-│   └── test_grpc_integration.cpp
+│   ├── test_lamport_clock.cpp
+│   ├── test_grpc_integration.cpp
+│   └── test_full_system.cpp
+├── app/
+│   ├── latency.cpp
+│   └── tput.cpp
+├── bench/
+│   ├── latency_plot.py
+│   └── lat-tput.py
+├── proto/
+│   └── locality_messaging.proto
 └── CMakeLists.txt
 ```
 
-## Prerequisites
+---
 
-- Docker Desktop (Linux containers mode)
-- Windows: PowerShell 5+
+## Build Instructions
 
-## Build
-
-```powershell
-cd docker
-docker compose build
+```bash
+cmake -S . -B build
+cmake --build build -j$(nproc)
 ```
 
-First build takes 10–20 minutes (gRPC compiles from source). Subsequent builds are cached and take under a minute.
+---
 
-## Run
+## Running the System
 
-**Start the fake auth service first (stands in for Venkat's control plane):**
+Start manually:
 
-```powershell
-docker compose up auth
+```bash
+./build/fake_auth_server 127.0.0.1:50060
+./build/raft_server node-1 127.0.0.1:50053 node-2=127.0.0.1:50054 node-3=127.0.0.1:50055
+./build/raft_server node-2 127.0.0.1:50054 node-1=127.0.0.1:50053 node-3=127.0.0.1:50055
+./build/raft_server node-3 127.0.0.1:50055 node-1=127.0.0.1:50053 node-2=127.0.0.1:50054
+./build/log_server node-1 0.0.0.0:50051 127.0.0.1:50053
 ```
 
-**Start a data plane node:**
+Run automated tests:
 
-```powershell
-# node-1 on port 50051
-docker compose up node1
-
-# node-2 on port 50052
-docker compose up node2
-
-# node-3 on port 50053
-docker compose up node3
+```bash
+ctest --test-dir build -V
 ```
 
-**Start all three nodes at once:**
+---
 
-```powershell
-docker compose up node1 node2 node3 auth
+## Testing
+
+### Unit Tests
+
+- Lamport clock correctness — tick, update, concurrent uniqueness
+- LogStore append, read, merge, hash, epoch behaviour
+
+### Integration Tests
+
+- gRPC SyncLogs handler
+- Per-message auth enforcement
+- Data plane correctness under concurrent writes
+
+### Full System Test
+
+- Raft leader election
+- ACL add and revoke via Raft
+- Crash recovery with re-election
+- Auth enforcement after revocation
+
+---
+
+## Performance Evaluation
+
+### Latency Benchmark
+
+```bash
+./build/latency_bench
 ```
 
-**Run the client (pushes a test batch to node-2):**
+Measures 1000 sequential operations across 5 runs, reporting average, min, and max latency.
 
-```powershell
-docker compose --profile integration up client
+### Throughput Benchmark
+
+```bash
+./build/tput_bench raft <nodes> <clients> <ops_per_client>
+./build/tput_bench dp <batch> <batches> <clients>
 ```
 
-**Stop everything:**
+Measures committed ops/sec and latency percentiles (P50, P99) across concurrent clients and cluster sizes.
 
-```powershell
-docker compose down
+### Graph Generation
+
+```bash
+python3 bench/latency_plot.py
+python3 bench/lat-tput.py
 ```
 
-## Run Tests
+### Sample Results
 
-```powershell
-docker compose up tests
-```
+| Metric      | Value                          |
+|-------------|-------------------------------|
+| Avg Latency | ~0.6 ms                       |
+| P99 Latency | ~8 ms                         |
+| Throughput  | ~1600 ops/sec (single client) |
 
-Results are saved to `build/test-results/` as JUnit XML — compatible with GitHub Actions, Jenkins, and any CI that reads JUnit reports.
-
-Run a specific suite:
-
-```powershell
-docker compose run tests bash -c "./build/run_tests [clock]"
-docker compose run tests bash -c "./build/run_tests [store]"
-docker compose run tests bash -c "./build/run_tests [concurrency]"
-```
+---
 
 ## Key Design Decisions
 
-**Log entry format.** Each `ChatEntry` carries a `message_id` (`sender_id + "_" + lamport_time`), payload, Lamport timestamp, and epoch. The checksum covers the payload only — metadata fields like `lamport_time` are mutable on receive so including them in the checksum would break on merge.
+**Lamport Clock.** Each write increments the clock before stamping the entry. On receive, the clock advances to `max(local, received) + 1`, preserving causal ordering without wall-clock synchronisation.
 
-**Lamport clock.** Implemented with `std::atomic<uint64_t>` for thread safety. On receive, the clock advances to `max(local, received) + 1`. On write, it increments before stamping the entry.
+**CRDT Merge.** Set-union semantics with dedup by `message_id`. Entries are sorted by `lamport_time` with `message_id` as tiebreak, ensuring all nodes converge to identical log state regardless of message arrival order.
 
-**CRDT merge.** Set-union semantics — dedup by `message_id`, sort by `lamport_time` with `message_id` as tiebreak for determinism across nodes. The local clock advances past any received timestamp.
+**Raft Integration.** Raft handles ordering and consensus for ACL mutations. LogStore handles storage and CRDT merge. The two planes are decoupled via the `IntegrationAuth` RPC boundary, allowing independent failure isolation.
 
-**Auth enforcement.** Every incoming `SyncLogs` batch is checked per-message against Venkat's `IntegrationAuth.CheckAuthorization`. Unauthorized entries are silently dropped (the batch is not rejected wholesale). If the auth service is unreachable, the node fails closed.
+**Fault Tolerance.** Crash-stop recovery via gossip resync. Leader re-election continues with a quorum of two nodes after any single node crash. Anti-entropy via `SyncLogs` ensures no entries are permanently lost.
 
-**Thread safety.** `LogStore` uses a `std::mutex` on all public methods. The gRPC server runs handlers concurrently so this is required from Day 1.
+---
 
-## Proto Contract
+## Limitations
 
-The shared proto is `proto/locality_messaging.proto`. It defines three services:
+- Data-plane log is in-memory only (the Raft log is persisted as of v2)
+- Network partitions are simulated (dashboard "pause" = SIGSTOP), not real
+- Leader is a throughput bottleneck for write-heavy workloads
 
-| Service | Owner | Purpose |
-|---|---|---|
-| `DataPlaneGossip` | Narayan | Gossip log sync between nodes |
-| `ControlPlaneRaft` | Venkat | Leader election, ACL mutations |
-| `IntegrationAuth` | Venkat | Per-message authorization checks |
+---
 
-The `fake_auth_server` binary implements `IntegrationAuth` as a stub that always returns `is_authorized: true`. Replace it with Venkat's real service by changing the `auth` container command in `docker-compose.yml`.
+## Results Summary
 
-## Known Limitations (Week 1 scope)
+- Deterministic convergence verified across 3 nodes
+- Correct ACL enforcement before and after revocation
+- Stable latency across repeated benchmark runs
+- Throughput scales then saturates at expected client concurrency levels
 
-- `lamport_time` is `int32` in the proto — will overflow under sustained concurrent writes. Raise with team to change to `int64` before Week 2.
-- Log storage is in-memory only. Persistence is out of scope until Week 5.
-- `SyncLogsResponse.receiver_lamport_time` currently returns the log hash as a placeholder. Expose the actual clock value before Week 2 gossip integration.
+---
 
-## End-of-Week Sync Agenda
+## Conclusion
 
-- Agree on `node_id` format with Kriti (currently `"node-1"`, `"node-2"` strings)
-- Confirm `lamport_time` field type change (`int32` → `int64`)
-- Verify `ChatEntry.message_id` format matches Kriti's gossip fanout expectations
-- Share `LogStore::get_hash()` endpoint spec with Kriti for convergence checking
+This system demonstrates strong consistency via Raft, eventual consistency via CRDT, robust recovery and fault tolerance, and realistic distributed system performance behaviour measured under both sequential and concurrent workloads.
+
+---
+
+## Future Work
+
+- Persistent storage for the data-plane log
+- Raft pre-vote and log compaction
+- True network partition simulation
+- Dynamic cluster membership changes
+- Load balancing reads across replicas

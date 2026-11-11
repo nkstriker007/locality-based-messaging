@@ -44,6 +44,7 @@ message LogEntry {
   enum CommandType {
     ADD_USER = 0;
     REVOKE_USER = 1;
+    NOOP = 2;          // appended by a new leader to commit earlier-term entries
   }
   CommandType type = 2;
   string target_user_id = 3;
@@ -77,14 +78,29 @@ message AppendEntriesReply {
 }
 
 message AddUserRequest { string user_id = 1; }
-message AddUserResponse { bool success = 1; int32 current_epoch = 2; }
+message AddUserResponse { bool success = 1; int32 current_epoch = 2; string leader_hint = 3; }
 message RevokeUserRequest { string user_id = 1; }
-message RevokeUserResponse { bool success = 1; int32 new_epoch = 2; }
+message RevokeUserResponse { bool success = 1; int32 new_epoch = 2; string leader_hint = 3; }
 message ListUsersRequest {}
 message ListUsersResponse {
   repeated string authorized_users = 1;
   int32 current_epoch = 2;
 }
+message StatusRequest {}
+message StatusResponse {
+  string node_id = 1;
+  string role = 2;          // "leader" | "follower" | "candidate"
+  int32 term = 3;
+  string leader_id = 4;     // best known leader ("" if unknown)
+  int32 commit_index = 5;
+  int32 last_applied = 6;
+  int32 log_size = 7;       // last log index
+  int32 current_epoch = 8;
+  int32 user_count = 9;
+  repeated string peers = 10;
+  int64 uptime_ms = 11;
+}
+
 message CertificateRequest { string user_id = 1; }
 message CertificateResponse {
   string user_id = 1;
@@ -98,6 +114,7 @@ service ControlPlaneRaft {
   rpc RevokeUser(RevokeUserRequest) returns (RevokeUserResponse);
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
   rpc GetCertificate(CertificateRequest) returns (CertificateResponse);
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
 }
 
 message AuthCheckRequest {
