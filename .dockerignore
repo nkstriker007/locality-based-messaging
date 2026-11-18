@@ -1,0 +1,8 @@
+build/
+.venv/
+Testing/
+ui/_gen/
+*.patch
+*.pdf
+raft_state_*
+raft_log_*

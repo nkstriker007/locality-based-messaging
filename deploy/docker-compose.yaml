@@ -1,0 +1,42 @@
+x-node: &node
+  image: lbm:latest
+  restart: unless-stopped
+
+services:
+  auth-1:
+    <<: *node
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["raft_server", "auth-1", "0.0.0.0:50053", "auth-2=auth-2:50053", "auth-3=auth-3:50053"]
+    ports: ["50053:50053"]
+    volumes: ["raft1:/data"]
+  auth-2:
+    <<: *node
+    command: ["raft_server", "auth-2", "0.0.0.0:50053", "auth-1=auth-1:50053", "auth-3=auth-3:50053"]
+    ports: ["50054:50053"]
+    volumes: ["raft2:/data"]
+  auth-3:
+    <<: *node
+    command: ["raft_server", "auth-3", "0.0.0.0:50053", "auth-1=auth-1:50053", "auth-2=auth-2:50053"]
+    ports: ["50055:50053"]
+    volumes: ["raft3:/data"]
+
+  dp-1:
+    <<: *node
+    command: ["log_server", "dp-1", "0.0.0.0:50051", "auth-1:50053"]
+    ports: ["50151:50051"]
+    depends_on: [auth-1]
+  dp-2:
+    <<: *node
+    command: ["log_server", "dp-2", "0.0.0.0:50051", "auth-2:50053"]
+    ports: ["50152:50051"]
+    depends_on: [auth-2]
+  dp-3:
+    <<: *node
+    command: ["log_server", "dp-3", "0.0.0.0:50051", "auth-3:50053"]
+    ports: ["50153:50051"]
+    depends_on: [auth-3]
+
+volumes:
+  raft1: {}
+  raft2: {}
+  raft3: {}
